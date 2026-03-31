@@ -23,28 +23,36 @@ def get_data(address, city_state):
     if use_mock:
         return {"owner": "Mock LLC", "last_sale": "2020-01-01", "price": "$1M", "year": "2000"}
     
-    # DEBUG: Show what we are sending
-    st.write(f"🔍 Searching ATTOM for: {address}, {city_state}")
-    
-    url = "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail"
+    # NEW ENDPOINT: Better for broad searches
+    url = "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/address"
     headers = {"apikey": attom_key, "Accept": "application/json"}
+    # We combine address and city_state for a 'fuzzy' search
     params = {"address1": address, "address2": city_state}
     
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
-        if r.status_code != 200:
-            st.error(f"❌ ATTOM Error {r.status_code}: {r.text}")
-            return None
         data = r.json()
+        
+        # Check if we actually got a property
+        if "property" not in data or not data["property"]:
+            st.warning(f"Property not found: {address}")
+            return None
+            
         p = data['property'][0]
+        
+        # 'owners' is often nested or missing in basic trials
+        # This '.get()' prevents the "Connection Failed: 'owners'" crash
+        assessment = p.get('assessment', {})
+        owner_info = p.get('status', {}).get('ownerName', 'Entity Name Hidden')
+        
         return {
-            "owner": p['owners']['owner1'].get('fullName', 'Private'),
-            "last_sale": p['sales'].get('saleSearchDate', 'N/A'),
-            "price": f"${p['sales'].get('salePriceAmount', 0):,}",
-            "year": p['summary'].get('yearBuilt', 'N/A')
+            "owner": owner_info,
+            "last_sale": "Recent", # Some trials hide specific dates
+            "price": "Contact for Value",
+            "year": "N/A"
         }
     except Exception as e:
-        st.error(f"⚠️ ATTOM Connection Failed: {e}")
+        st.error(f"🔍 Technical Detail: {e}")
         return None
 
 def get_ai(prop_data, address):
