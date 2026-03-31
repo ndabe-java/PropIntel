@@ -1,110 +1,100 @@
 import streamlit as st
 import pandas as pd
-import openai
 import requests
 import time
 
+# --- 1. BRANDING & CONFIG ---
 st.set_page_config(page_title="PropIntel Engine", page_icon="🏢", layout="wide")
-st.title("🏢 PropIntel Engine (Debug Mode)")
+st.title("🏢 PropIntel Engine")
 
-# --- 1. CONFIG & SECRETS ---
+# --- 2. API KEY MANAGEMENT ---
 with st.sidebar:
-    st.header("🔑 Connection")
-    # Priority: Secrets -> Manual Input
-    sc_openai = st.secrets.get("OPENAI_API_KEY", "")
-    sc_attom = st.secrets.get("ATTOM_API_KEY", "")
-    openai_key = st.text_input("OpenAI API Key", value=sc_openai, type="password")
-    attom_key = st.text_input("ATTOM API Key", value=sc_attom, type="password")
-    use_mock = st.checkbox("Force Mock Mode (No APIs)", value=False)
-
-# --- 2. THE ENGINE ---
-
-def get_data(address, city_state):
-    if use_mock:
-        return {"owner": "Mock LLC", "last_sale": "2020-01-01", "price": "$1M", "year": "2000"}
+    st.header("🔑 Connection Settings")
     
-    # NEW ENDPOINT: Better for broad searches
+    # Check for Groq instead of OpenAI
+    sc_groq = st.secrets.get("GROQ_API_KEY", "")
+    sc_attom = st.secrets.get("ATTOM_API_KEY", "")
+
+    groq_key = st.text_input("Groq API Key (Free)", value=sc_groq, type="password")
+    attom_key = st.text_input("ATTOM API Key", value=sc_attom, type="password")
+    
+    if not groq_key:
+        st.info("💡 Get a free AI key at console.groq.com")
+# --- 3. CORE LOGIC ---
+
+def get_property_data(address, city_state):
+    """Fetches public records from ATTOM."""
+    if not attom_key: return None
+    
     url = "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/address"
     headers = {"apikey": attom_key, "Accept": "application/json"}
-    # We combine address and city_state for a 'fuzzy' search
     params = {"address1": address, "address2": city_state}
     
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get(url, headers=headers, params=params, timeout=5)
         data = r.json()
-        
-        # Check if we actually got a property
-        if "property" not in data or not data["property"]:
-            st.warning(f"Property not found: {address}")
-            return None
-            
-        p = data['property'][0]
-        
-        # 'owners' is often nested or missing in basic trials
-        # This '.get()' prevents the "Connection Failed: 'owners'" crash
-        assessment = p.get('assessment', {})
-        owner_info = p.get('status', {}).get('ownerName', 'Entity Name Hidden')
-        
-        return {
-            "owner": owner_info,
-            "last_sale": "Recent", # Some trials hide specific dates
-            "price": "Contact for Value",
-            "year": "N/A"
-        }
-    except Exception as e:
-        st.error(f"🔍 Technical Detail: {e}")
-        return None
+        if "property" in data and data["property"]:
+            p = data['property'][0]
+            # Fallback for hidden owner names in trial keys
+            owner = p.get('status', {}).get('ownerName', "Contact for Owner")
+            return {"owner": owner}
+        return {"owner": "Unknown Entity"}
+    except:
+        return {"owner": "Data Unavailable"}
 
-def get_ai(prop_data, address):
-    if use_mock: return "9", "Great deal!"
-    if not openai_key: return "N/A", "No OpenAI Key"
+def get_free_ai_hook(owner_name, address):
+    """Uses Groq (Llama 3.3) for free AI generation."""
+    if not groq_key:
+        return "5", "Please provide Groq Key for AI hooks."
+
+    # Groq uses the same structure as OpenAI!
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"}
+    
+    prompt = f"Property: {address}. Owner: {owner_name}. Task: Score lead 1-10 and write a 2-sentence broker email hook. Return ONLY: SCORE: X | HOOK: Text"
+    
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}]
+    }
 
     try:
-        client = openai.OpenAI(api_key=openai_key)
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": f"Score 1-10 and write a pitch for {address} owned by {prop_data['owner']}. Format: SCORE: X | HOOK: Text"}]
-        )
-        res = resp.choices[0].message.content
-        score = res.split('|')[0].replace("SCORE:", "").strip()
-        hook = res.split('|')[1].replace("HOOK:", "").strip()
+        resp = requests.post(url, json=payload, headers=headers)
+        res_text = resp.json()['choices'][0]['message']['content']
+        score = res_text.split('|')[0].replace("SCORE:", "").strip()
+        hook = res_text.split('|')[1].replace("HOOK:", "").strip()
         return score, hook
-    except Exception as e:
-        st.error(f"❌ OpenAI Error: {e}")
-        return "0", "API Error"
+    except:
+        return "N/A", "AI busy or key error."
 
-# --- 3. THE UI ---
+# --- 4. THE UI ---
 
 uploaded_file = st.file_uploader("Upload Lead CSV", type=["csv"])
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file)
-    # CLEANING: Remove extra spaces from column names
-    df.columns = df.columns.str.strip()
-    
-    if st.button("🚀 Run Engine"):
+    if st.button("🚀 Run Free Engine"):
         results = []
+        progress = st.progress(0)
+        
         for i, row in df.iterrows():
-            # Match columns regardless of case
             addr = row.get('Address') or row.get('address')
             cs = row.get('CityState') or row.get('citystate')
             
-            if addr and cs:
-                data = get_data(addr, cs)
-                if data:
-                    score, hook = get_ai(data, addr)
-                    results.append({
-                        "Address": addr,
-                        "Owner": data['owner'],
-                        "PropIntel Score": score,
-                        "Hook": hook
-                    })
-            else:
-                st.warning(f"Row {i} is missing 'Address' or 'CityState' column.")
+            if addr:
+                # 1. Get Data
+                prop = get_property_data(addr, cs)
+                # 2. Get AI
+                score, hook = get_free_ai_hook(prop['owner'], addr)
+                
+                results.append({
+                    "Address": addr,
+                    "Actual Owner": prop['owner'],
+                    "PropIntel Score": score,
+                    "Personalized Hook": hook
+                })
+            progress.progress((i + 1) / len(df))
         
         if results:
-            final_df = pd.DataFrame(results)
-            st.success("Done!")
-            st.dataframe(final_df)
-        else:
-            st.error("No results found. Check the red error boxes above.")
+            st.success("Done! Processed with 0 cost.")
+            st.dataframe(pd.DataFrame(results))
