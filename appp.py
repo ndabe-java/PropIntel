@@ -4,139 +4,99 @@ import openai
 import requests
 import time
 
-# --- 1. SETTINGS & BRANDING ---
 st.set_page_config(page_title="PropIntel Engine", page_icon="🏢", layout="wide")
+st.title("🏢 PropIntel Engine (Debug Mode)")
 
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    .stButton>button { width: 100%; background-color: #007BFF; color: white; border-radius: 5px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-st.title("🏢 PropIntel Engine")
-st.caption("Commercial Real Estate Intelligence & Outreach Automation")
-
-# --- 2. API KEY MANAGEMENT ---
-# Priority: 1. Streamlit Secrets (Cloud) -> 2. Sidebar Input (Manual)
+# --- 1. CONFIG & SECRETS ---
 with st.sidebar:
-    st.header("🔑 Connection Settings")
+    st.header("🔑 Connection")
+    # Priority: Secrets -> Manual Input
+    sc_openai = st.secrets.get("OPENAI_API_KEY", "")
+    sc_attom = st.secrets.get("ATTOM_API_KEY", "")
+    openai_key = st.text_input("OpenAI API Key", value=sc_openai, type="password")
+    attom_key = st.text_input("ATTOM API Key", value=sc_attom, type="password")
+    use_mock = st.checkbox("Force Mock Mode (No APIs)", value=False)
+
+# --- 2. THE ENGINE ---
+
+def get_data(address, city_state):
+    if use_mock:
+        return {"owner": "Mock LLC", "last_sale": "2020-01-01", "price": "$1M", "year": "2000"}
     
-    # Try to get keys from Secrets (for GitHub/Cloud deployment)
-    try:
-        default_openai = st.secrets["OPENAI_API_KEY"]
-        default_attom = st.secrets["ATTOM_API_KEY"]
-    except:
-        default_openai = ""
-        default_attom = ""
-
-    openai_key = st.text_input("OpenAI API Key", value=default_openai, type="password")
-    attom_key = st.text_input("ATTOM API Key", value=default_attom, type="password")
+    # DEBUG: Show what we are sending
+    st.write(f"🔍 Searching ATTOM for: {address}, {city_state}")
     
-    st.divider()
-    use_mock = st.checkbox("Use Mock Data (Test Mode)", value=False)
-    st.info("Mock Mode allows you to test the UI without spending API credits.")
-
-# --- 3. CORE LOGIC FUNCTIONS ---
-
-def get_property_data(address, city_state):
-    """Fetches ownership data from ATTOM API."""
-    if use_mock or not attom_key:
-        return {"owner": "PropIntel Holdings LLC", "last_sale": "2016-04-12", "price": "$4,250,000", "year_built": "1998"}
-
     url = "https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail"
     headers = {"apikey": attom_key, "Accept": "application/json"}
     params = {"address1": address, "address2": city_state}
     
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        data = resp.json()
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code != 200:
+            st.error(f"❌ ATTOM Error {r.status_code}: {r.text}")
+            return None
+        data = r.json()
         p = data['property'][0]
         return {
-            "owner": p['owners']['owner1'].get('fullName', 'Private Owner'),
-            "last_sale": p['sales'].get('saleSearchDate', 'Unknown'),
+            "owner": p['owners']['owner1'].get('fullName', 'Private'),
+            "last_sale": p['sales'].get('saleSearchDate', 'N/A'),
             "price": f"${p['sales'].get('salePriceAmount', 0):,}",
-            "year_built": p['summary'].get('yearBuilt', 'N/A')
+            "year": p['summary'].get('yearBuilt', 'N/A')
         }
-    except:
+    except Exception as e:
+        st.error(f"⚠️ ATTOM Connection Failed: {e}")
         return None
 
-def generate_ai_analysis(prop_data, address):
-    """Generates the score and the pitch using OpenAI."""
-    if use_mock or not openai_key:
-        return "8", "I noticed you've held the asset at " + address + " for several years. Given the current market shift, are you looking to hold or exit?"
+def get_ai(prop_data, address):
+    if use_mock: return "9", "Great deal!"
+    if not openai_key: return "N/A", "No OpenAI Key"
 
     try:
         client = openai.OpenAI(api_key=openai_key)
-        prompt = f"""
-        Property: {address} | Owner: {prop_data['owner']} | Last Sold: {prop_data['last_sale']}
-        1. Score likelihood to sell 1-10 (High score if held > 7 years).
-        2. Write a 2-sentence email hook for a broker.
-        Return ONLY: SCORE: [X] | HOOK: [Text]
-        """
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": f"Score 1-10 and write a pitch for {address} owned by {prop_data['owner']}. Format: SCORE: X | HOOK: Text"}]
         )
-        text = response.choices[0].message.content
-        score = text.split('|')[0].replace("SCORE:", "").strip()
-        hook = text.split('|')[1].replace("HOOK:", "").strip()
+        res = resp.choices[0].message.content
+        score = res.split('|')[0].replace("SCORE:", "").strip()
+        hook = res.split('|')[1].replace("HOOK:", "").strip()
         return score, hook
-    except:
-        return "5", "Standard Outreach: Interested in discussing your property's valuation?"
+    except Exception as e:
+        st.error(f"❌ OpenAI Error: {e}")
+        return "0", "API Error"
 
-# --- 4. THE USER INTERFACE ---
+# --- 3. THE UI ---
 
-uploaded_file = st.file_uploader("Upload Lead CSV (Columns: Address, CityState)", type=["csv"])
+uploaded_file = st.file_uploader("Upload Lead CSV", type=["csv"])
 
 if uploaded_file:
-    input_df = pd.read_csv(uploaded_file)
+    df = pd.read_csv(uploaded_file)
+    # CLEANING: Remove extra spaces from column names
+    df.columns = df.columns.str.strip()
     
-    # Verify Columns
-    required = ['Address', 'CityState']
-    if not all(col in input_df.columns for col in required):
-        st.error(f"CSV must contain these exact headers: {required}")
-    else:
-        st.write(f"✅ Found {len(input_df)} leads. Ready to process.")
-        
-        if st.button("🚀 Execute Intelligence Engine"):
-            enriched_results = []
-            progress_bar = st.progress(0)
+    if st.button("🚀 Run Engine"):
+        results = []
+        for i, row in df.iterrows():
+            # Match columns regardless of case
+            addr = row.get('Address') or row.get('address')
+            cs = row.get('CityState') or row.get('citystate')
             
-            for i, row in input_df.iterrows():
-                # 1. Fetch Data
-                p_data = get_property_data(row['Address'], row['CityState'])
-                
-                if p_data:
-                    # 2. Analyze
-                    score, hook = generate_ai_analysis(p_data, row['Address'])
-                    
-                    # 3. Store
-                    enriched_results.append({
-                        "Address": row['Address'],
-                        "City/State": row['CityState'],
-                        "Actual Owner": p_data['owner'],
-                        "Last Sale": p_data['last_sale'],
+            if addr and cs:
+                data = get_data(addr, cs)
+                if data:
+                    score, hook = get_ai(data, addr)
+                    results.append({
+                        "Address": addr,
+                        "Owner": data['owner'],
                         "PropIntel Score": score,
-                        "AI Hook": hook
+                        "Hook": hook
                     })
-                
-                progress_bar.progress((i + 1) / len(input_df))
-                time.sleep(0.2)
-
-            # --- 5. DATA DISPLAY & DOWNLOAD ---
-            if enriched_results:
-                final_df = pd.DataFrame(enriched_results)
-                
-                # The "Error Proof" Sort
-                if "PropIntel Score" in final_df.columns:
-                    final_df["PropIntel Score"] = pd.to_numeric(final_df["PropIntel Score"], errors='coerce').fillna(0)
-                    final_df = final_df.sort_values(by="PropIntel Score", ascending=False)
-
-                st.success("Analysis Complete!")
-                st.dataframe(final_df, use_container_width=True)
-                
-                csv_data = final_df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Download Broker Report", data=csv_data, file_name="propintel_results.csv")
             else:
-                st.warning("No data could be processed. Check your API keys or CSV format.")
+                st.warning(f"Row {i} is missing 'Address' or 'CityState' column.")
+        
+        if results:
+            final_df = pd.DataFrame(results)
+            st.success("Done!")
+            st.dataframe(final_df)
+        else:
+            st.error("No results found. Check the red error boxes above.")
